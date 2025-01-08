@@ -1,7 +1,9 @@
-import { join } from "path"
+import { join, dirname } from "path"
 import { createWriteStream, existsSync, mkdirSync, writeFileSync } from "fs";
 
 import { downloadFile, listFiles } from "@huggingface/hub";
+
+
 
 const Modality = {
     TextEncoder: "text_encoder",
@@ -39,7 +41,12 @@ async function getModel(modelId, modalities, token = null, format = '.onnx', sav
     const configNames = ['config.json'];
     const tokenizerNames = ['tokenizer.json'];
     const modelFileNames = modalities.map(modality => `${modality}${format}`);
+
+
+
     const allowedPatterns = [...modelFileNames, ...configNames, ...tokenizerNames];
+
+
 
     const repo = { type: "model", name: modelId };
     const credentials = token ? { accessToken: token } : undefined;
@@ -54,46 +61,57 @@ async function getModel(modelId, modalities, token = null, format = '.onnx', sav
     const fileIterator = listFiles({ repo, recursive: true, credentials });
     for await (const file of fileIterator) {
         const fileName = file.path.split('/').pop();
-        if (fileName && allowedPatterns.includes(fileName)) {
-            const filePath = file.path;
-            const savePath = join(modelSaveDir, fileName);
+        if (fileName) {
+            const matchingPattern = allowedPatterns.find(pattern => {
+                // Convert glob pattern to regexp
+                const regexPattern = pattern.replace(/\./g, '\\.').replace(/\*/g, '.*');
+                return new RegExp(`${regexPattern}`).test(file.path);
+            });
 
-            if (configNames.includes(fileName)) {
-                configPath = savePath;
-            } else if (tokenizerNames.includes(fileName)) {
-                tokenizerPath = savePath;
-            } else {
-                const modalityName = fileName.split('.')[0];
-                modalityPaths[modalityName] = savePath;
-            }
+            if (matchingPattern) {
 
-            const response = await downloadFile({ repo, path: filePath, credentials });
-            if (response) {
-                // HuggingFace might be defining the `env.localModelPath` variable
-                // to store the downloaded files in a local directory.
-                // Let's check if the file is there.
-                // const localPath = join(env.localModelPath, repo, filePath);
-                // if (existsSync(localPath)) {
-                //     console.log(`File already exists locally at ${localPath}`);
-                // }
+                const filePath = file.path;
+                const savePath = join(modelSaveDir, file.path);
 
-                if (response.body && response.body.pipe) {
-                    const fileStream = createWriteStream(savePath);
-                    response.body.pipe(fileStream);
-                    await new Promise((resolve, reject) => {
-                        fileStream.on('finish', resolve);
-                        fileStream.on('error', reject);
-                    });
-                } else if (response.arrayBuffer) {
-                    // Handle non-streamable response for environments like Node.js
-                    const buffer = await response.arrayBuffer();
-                    writeFileSync(savePath, Buffer.from(buffer));
+                // Create directory for savePath if it doesn't exist
+                const saveDir = dirname(savePath);
+                await ensureDirectoryExists(saveDir);
+
+                if (configNames.includes(fileName)) {
+                    configPath = savePath;
+                } else if (tokenizerNames.includes(fileName)) {
+                    tokenizerPath = savePath;
                 } else {
-                    console.error('Unexpected response type');
+                    const modalityName = fileName.split('.')[0];
+                    modalityPaths[modalityName] = savePath;
                 }
-                console.log(`Downloaded ${fileName} successfully to ${savePath}`);
-            } else {
-                console.log('No response received for the file download request.');
+
+                // Skip download if file already exists
+                if (existsSync(savePath)) {
+                    console.log(`File ${fileName} already exists at ${savePath}, skipping download`);
+                    continue;
+                }
+
+                const response = await downloadFile({ repo, path: filePath, credentials });
+                if (response) {
+                    if (response.body && response.body.pipe) {
+                        const fileStream = createWriteStream(savePath);
+                        response.body.pipe(fileStream);
+                        await new Promise((resolve, reject) => {
+                            fileStream.on('finish', resolve);
+                            fileStream.on('error', reject);
+                        });
+                    } else if (response.arrayBuffer) {
+                        // Handle non-streamable response for environments like Node.js
+                        const buffer = await response.arrayBuffer();
+                        writeFileSync(savePath, Buffer.from(buffer));
+                    } else {
+                        console.error('Unexpected response type');
+                    }
+                    console.log(`Downloaded ${fileName} successfully to ${savePath}`);
+                } else {
+                    console.log('No response received for the file download request.');
+                }
             }
         }
     }
